@@ -1,25 +1,24 @@
 import os
 import argparse
-import torch
-from llama3 import Transformer, LLAMA_8B
+import time
 
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    CPUOffload,
-    MixedPrecision,
-    BackwardPrefetch,
-    ShardingStrategy,
-    FullStateDictConfig,
-    StateDictType,
-)
+import torch
+import torch.distributed.fsdp._runtime_utils as _runtime_utils
+import torch.distributed.fsdp.fully_sharded_data_parallel as fsdp_module
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import wrapping
 import fsdp_config as config
-import time
+from llama3 import Transformer, LLAMA_8B
+from _fsdp_tracking_utils import (
+    _wrapped_unshard,
+    _wrapped_post_backward_hook,
+    _wrapped_post_backward_final_callback,
+    _wrapped_post_forward,
+)
 
 
-def fsdp_main(args):
-
+def main(args):
     rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -30,6 +29,12 @@ def fsdp_main(args):
     batch_size = 32
     seq_len = 64
     model_args = LLAMA_8B
+
+    _runtime_utils._unshard = _wrapped_unshard
+    _runtime_utils._post_backward_hook = _wrapped_post_backward_hook
+    _runtime_utils._post_backward_final_callback = _wrapped_post_backward_final_callback
+    fsdp_module._post_forward = _wrapped_post_forward
+
     transformer_auto_wrap_policy = wrapping.get_transformer_wrapper()
     model = Transformer(model_args).to_empty(device="meta")
     model = FSDP(
@@ -42,38 +47,38 @@ def fsdp_main(args):
 
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
 
-    # with torch.profiler.profile(
-    #         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-    #         on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
-    #         record_shapes=True,
-    #         profile_memory=True,
-    #         with_stack=True
-    # ) as prof:
-    #     for _ in range(5):
-    #         prof.step()
-    #         x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-    #         loss = model(x, 0).sum()
-    #         loss.backward()
-    #         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    #         optim.step()
-    #         optim.zero_grad()
-    #         time.sleep(0.5)
-
-    for _ in range(5):
+    def train_step():
         x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
         loss = model(x, 0).sum()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optim.step()
         optim.zero_grad()
-        time.sleep(0.5)
+
+    prof = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+    )
+    
+    if args.profile:
+        with prof:
+            for _ in range(5):
+                prof.step()
+                train_step()
+                time.sleep(0.5)
+    else:
+        for _ in range(5):
+            train_step()
+            time.sleep(0.5)
 
     torch.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':
-    # Training settings
     parser = argparse.ArgumentParser(description='PyTorch llama3 FSDP Example')
+    parser.add_argument("--profile", action="store_true", default=False)
     args = parser.parse_args()
-
-    fsdp_main(args)
+    main(args)

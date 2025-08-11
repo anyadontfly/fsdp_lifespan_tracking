@@ -1,7 +1,7 @@
 import os
 from enum import Enum
 from functools import wraps
-from typing import Any, Callable, Dict, NamedTuple
+from typing import Any, Callable, Dict, NamedTuple, Optional
 import logging
 
 import torch
@@ -45,42 +45,52 @@ class _FSDPHookState(Enum):
 
 class _FSDPTimingEvents:
     def __init__(self):
-        self.fwd_all_gather_event: torch.cuda.Event = None
-        self.fwd_reshard_event: torch.cuda.Event = None
-        self.bwd_all_gather_event: torch.cuda.Event = None
-        self.bwd_reshard_event: torch.cuda.Event = None
-        self.bwd_reduce_scatter_event: torch.cuda.Event = None
+        self.fwd_all_gather_event: Optional[torch.cuda.Event] = None
+        self.fwd_reshard_event: Optional[torch.cuda.Event] = None
+        self.bwd_all_gather_event: Optional[torch.cuda.Event] = None
+        self.bwd_reshard_event: Optional[torch.cuda.Event] = None
+        self.bwd_reduce_scatter_event: Optional[torch.cuda.Event] = None
         self.synced: bool = False
 
     def sync_on_events(self) -> bool:
-        if not self.finished:
+        if not self.finished or self.bwd_reduce_scatter_event is None:
             return False
         self.bwd_reduce_scatter_event.synchronize()
         self.synced = True
         return True
 
-    def get_fwd_params_lifespan(self) -> float:
+    def get_fwd_params_lifespan(self) -> Optional[float]:
         if not self.synced or self.is_root:
+            return None
+        if self.fwd_reshard_event is None or self.fwd_all_gather_event is None:
             return None
         return self.fwd_all_gather_event.elapsed_time(self.fwd_reshard_event)
-    
-    def get_bwd_params_lifespan(self) -> float:
+
+    def get_bwd_params_lifespan(self) -> Optional[float]:
         if not self.synced or self.is_root:
+            return None
+        if self.bwd_reshard_event is None or self.bwd_all_gather_event is None:
             return None
         return self.bwd_all_gather_event.elapsed_time(self.bwd_reshard_event)
-    
-    def get_bwd_grads_lifespan(self) -> float:
+
+    def get_bwd_grads_lifespan(self) -> Optional[float]:
         if not self.synced or self.is_root:
             return None
+        if self.bwd_all_gather_event is None or self.bwd_reduce_scatter_event is None:
+            return None
         return self.bwd_all_gather_event.elapsed_time(self.bwd_reduce_scatter_event)
-    
-    def get_root_params_lifespan(self) -> float:
+
+    def get_root_params_lifespan(self) -> Optional[float]:
         if not self.synced or not self.is_root:
             return None
+        if self.fwd_reshard_event is None or self.fwd_all_gather_event is None:
+            return None
         return self.fwd_all_gather_event.elapsed_time(self.bwd_reshard_event)
-    
-    def get_root_grads_lifespan(self) -> float:
+
+    def get_root_grads_lifespan(self) -> Optional[float]:
         if not self.synced or not self.is_root:
+            return None
+        if self.fwd_all_gather_event is None or self.bwd_reduce_scatter_event is None:
             return None
         return self.fwd_all_gather_event.elapsed_time(self.bwd_reduce_scatter_event)
     
