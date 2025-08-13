@@ -124,7 +124,6 @@ class FSDPLifespanTracker:
         self.mod_to_timing_events: Dict[_NamedFSDPModuleWeakRef, _FSDPTimingEvents] = {}
         self.mod_to_saved_hooks: WeakIdKeyDictionary = WeakIdKeyDictionary()
         self.steps = None
-        self.logger = setup_logger(rank)
 
     def _wrapped_hook(
         self,
@@ -279,6 +278,7 @@ class FSDPLifespanTracker:
     
     def __enter__(self) -> "FSDPLifespanTracker":
         self.steps = 0
+        self.logger = setup_logger(self.rank)
         self._register_module_hooks()
         return self
 
@@ -287,3 +287,4 @@ class FSDPLifespanTracker:
         self._deregister_module_hooks()
         self.mod_to_saved_hooks.clear()
         self.mod_to_timing_events.clear()
+        self.logger = None

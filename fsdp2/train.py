@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+from contextlib import contextmanager, ExitStack
 
 from llama3 import Transformer, LLAMA_8B
 from fsdp2_lifespan_tracker import FSDPLifespanTracker
@@ -27,6 +28,21 @@ def set_modules_to_backward_prefetch(model, num_to_backward_prefetch):
             model.layers[i - j] for j in range(1, num_to_backward_prefetch + 1)
         ]
         layer.set_modules_to_backward_prefetch(layers_to_prefetch)
+
+
+@contextmanager
+def profile_and_lifespan_contexts(
+    use_profile,
+    use_lifespan_tracker,
+    profiler,
+    lifespan_tracker
+):
+    with ExitStack() as stack:
+        if use_profile:
+            stack.enter_context(profiler)
+        if use_lifespan_tracker:
+            stack.enter_context(lifespan_tracker)
+        yield
 
 
 def main(args):
@@ -75,27 +91,21 @@ def main(args):
     tracker = FSDPLifespanTracker(model, rank, num_warmup_steps=1)
 
     prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
     )
-    
-    if args.profile:
-        with prof:
-            with tracker:
-                for _ in range(5):
-                    prof.step()
-                    train_step()
-                    tracker.step()
-                    time.sleep(0.5)
-    else:
-        with tracker:
-            for _ in range(5):
-                train_step()
+
+    with profile_and_lifespan_contexts(args.profile, args.lifespan_tracker, prof, tracker):
+        for _ in range(5):
+            if args.profile:
+                prof.step()
+            train_step()
+            if args.lifespan_tracker:
                 tracker.step()
-                time.sleep(0.5)
+            time.sleep(0.5)
 
     torch.distributed.destroy_process_group()
 
@@ -106,5 +116,6 @@ if __name__ == "__main__":
     parser.add_argument("--mixed-precision", action="store_true", default=False)
     parser.add_argument("--dcp-api", action="store_true", default=False)
     parser.add_argument("--profile", action="store_true", default=False)
+    parser.add_argument("--lifespan-tracker", action="store_true", default=False)
     args = parser.parse_args()
     main(args)
