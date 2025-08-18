@@ -1,4 +1,4 @@
-import os
+import os, time
 
 from llama3 import Transformer, LLAMA_MINI
 
@@ -19,7 +19,7 @@ def main():
     torch.distributed.init_process_group(backend="nccl", device_id=device)
     torch.manual_seed(0)
     torch.set_default_dtype(torch.bfloat16)
-    num_iters = 1
+    num_iters = 3
     vocab_size = 1024
     batch_size = 32
     seq_len = 64
@@ -37,6 +37,7 @@ def main():
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
 
     for _ in range(num_iters):
+        time.sleep(0.5)
         x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
         loss = model(x, 0).sum()
         loss.backward()
